@@ -27,7 +27,6 @@ options = dict(
     packages=['mps_youtube'],
     entry_points={'console_scripts': ['mpsyt = mps_youtube:main.main']},
     install_requires=['pafy >= 0.3.74'],
-    package_data={"": ["LICENSE", "README.rst", "CHANGELOG"]},
     classifiers=[
         "Topic :: Utilities",
         "Topic :: Internet :: WWW/HTTP",
@@ -61,12 +60,13 @@ options = dict(
             "bundle_files": 1
         }
     },
+    data_files=[("", ["LICENSE", "README.rst", "CHANGELOG"])],
     long_description=open("README.rst").read()
 )
 
 if sys.platform.startswith('linux'):
     # Install desktop file. Required for mpris on Ubuntu
-    options['data_files'] = [('share/applications/', ['mps-youtube.desktop'])]
+    options['data_files'].append(('share/applications/', ['mps-youtube.desktop']))
 
 if os.name == "nt":
     try:

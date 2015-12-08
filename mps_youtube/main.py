@@ -50,19 +50,20 @@ import sys
 import re
 import os
 import pickle
+import webbrowser
 from urllib.request import urlopen, build_opener
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 import pafy
 
-from . import terminalsize, g, c, cache, streams
+from . import terminalsize, g, c, commands, cache, streams, screen
 from .playlist import Playlist, Video
 from .paths import get_config_dir
 from .config import Config, known_player_set, import_config
 from .util import has_exefile, get_mpv_version, dbg, list_update, get_near_name
 from .util import get_mplayer_version, get_pafy
-from .util import xenc, xprint, mswinfn, set_window_title, clear_screen, F
+from .util import xenc, xprint, mswinfn, set_window_title, F
 from .helptext import helptext, get_help
 
 try:
@@ -94,23 +95,8 @@ mswin = os.name == "nt"
 not_utf8_environment = mswin or "UTF-8" not in sys.stdout.encoding
 
 locale.setlocale(locale.LC_ALL, "")  # for date formatting
-XYTuple = collections.namedtuple('XYTuple', 'width height max_results')
 
 ISO8601_TIMEDUR_EX = re.compile(r'PT((\d{1,3})H)?((\d{1,3})M)?((\d{1,2})S)?')
-
-
-def getxy():
-    """ Get terminal size, terminal width and max-results. """
-    if g.detectable_size:
-        x, y = terminalsize.get_terminal_size()
-        max_results = y - 4 if y < 54 else 50
-        max_results = 1 if y <= 5 else max_results
-
-    else:
-        x, max_results = Config.CONSOLE_WIDTH.get, Config.MAX_RESULTS.get
-        y = max_results + 4
-
-    return XYTuple(x, y, max_results)
 
 
 def get_content_length(url, preloading=False):
@@ -134,7 +120,7 @@ def get_size(ytid, url, preloading=False):
         dbg("%s%susing cached size: %s%s", c.g, prefix, size, c.w)
 
     else:
-        writestatus("Getting content length", mute=preloading)
+        screen.writestatus("Getting content length", mute=preloading)
         stream['size'] = get_content_length(url, preloading=preloading)
         dbg("%s%s - content-length: %s%s", c.y, prefix, stream['size'], c.w)
 
@@ -395,9 +381,10 @@ def init_readline():
             dbg(c.g + "Read history file" + c.w)
 
 
-def showconfig(_):
+@commands.command(r'set|showconfig$')
+def showconfig():
     """ Dump config data. """
-    width = getxy().width
+    width = screen.getxy().width
     width -= 30
     s = "  %s%-17s%s : %s\n"
     out = "  %s%-17s   %s%s%s\n" % (c.ul, "Key", "Value", " " * width, c.w)
@@ -423,6 +410,7 @@ def showconfig(_):
     g.message += "Enter %sset all default%s to reset all" % (c.g, c.w)
 
 
+@commands.command(r'set\s+([-\w]+)\s*(.*?)$')
 def setconfig(key, val):
     """ Set configuration variable. """
     key = key.replace("-", "_")
@@ -563,7 +551,7 @@ def logo(col=None, version=""):
     logo_txt = col + logo_txt + c.w + version
     lines = logo_txt.split("\n")
     length = max(len(x) for x in lines)
-    x, y, _ = getxy()
+    x, y, _ = screen.getxy()
     indent = (x - length - 1) // 2
     newlines = (y - 12) // 2
     indent, newlines = (0 if x < 0 else x for x in (indent, newlines))
@@ -690,7 +678,7 @@ def get_page_info_from_json(jsons, result_count=None):
     """ Extract & save some information about result count and paging. """
     g.more_pages = jsons.get('nextPageToken')
     if result_count:
-        if result_count < getxy().max_results:
+        if result_count < screen.getxy().max_results:
             g.more_pages = False
     pageinfo = jsons.get('pageInfo')
     per_page = pageinfo.get('resultsPerPage')
@@ -784,32 +772,11 @@ def get_tracks_from_json(jsons):
     return songs
 
 
-
-def screen_update(fill_blank=True):
-    """ Display content, show message, blank screen."""
-    clear_screen()
-
-    if g.content:
-        xprint(g.content)
-
-    if g.message or g.rprompt:
-        length = c.charcount
-        out = g.message or ''
-        blanks = getxy().width - length(out) - length(g.rprompt or '') - 3
-        out += ' ' * blanks + (g.rprompt or '')
-        xprint(out)
-
-    elif fill_blank:
-        xprint("")
-
-    g.message = g.content = g.rprompt = False
-
-
 def playback_progress(idx, allsongs, repeat=False):
     """ Generate string to show selected tracks, indicate current track. """
     # pylint: disable=R0914
     # too many local variables
-    cw = getxy().width
+    cw = screen.getxy().width
     out = "  %s%-XXs%s%s\n".replace("XX", str(cw - 9))
     out = out % (c.ul, "Title", "Time", c.w)
     show_key_help = (known_player_set and Config.SHOW_MPLAYER_KEYS.get)
@@ -936,7 +903,7 @@ def generate_playlist_display():
         return logo(c.g) + "\n\n"
     g.rprompt = page_msg(g.current_page)
 
-    cw = getxy().width
+    cw = screen.getxy().width
     fmtrow = "%s%-5s %s %-12s %-8s  %-2s%s\n"
     fmthd = "%s%-5s %-{}s %-12s %-9s %-5s%s\n".format(cw - 36)
     head = (c.ul, "Item", "Playlist", "Author", "Updated", "Count", c.w)
@@ -983,7 +950,7 @@ def get_user_columns():
                 sz = int(namesize[1])
 
             total_size += sz
-            cw = getxy().width
+            cw = screen.getxy().width
             if total_size < cw - 18:
                 ret.append(dict(name=nm, size=sz, heading=hd))
 
@@ -992,7 +959,7 @@ def get_user_columns():
 
 def page_msg(page=0):
     """ Format information about currently displayed page to a string. """
-    max_results = getxy().max_results
+    max_results = screen.getxy().max_results
     page_count = max(int(math.ceil(min(g.result_count, 500)/max_results)), 1)
     if page_count > 1:
         pagemsg = "{}{}/{}{}"
@@ -1011,7 +978,7 @@ def generate_songlist_display(song=False, zeromsg=None, frmat="search"):
     if g.browse_mode == "ytpl":
         return generate_playlist_display()
 
-    max_results = getxy().max_results
+    max_results = screen.getxy().max_results
 
     songs = g.model.songs or []
 
@@ -1026,7 +993,7 @@ def generate_songlist_display(song=False, zeromsg=None, frmat="search"):
     lengthsize = 8 if maxlength > 35999 else 7
     lengthsize = 5 if maxlength < 6000 else lengthsize
     reserved = 9 + lengthsize + len(user_columns)
-    cw = getxy().width
+    cw = screen.getxy().width
     cw -= 1
     title_size = cw - sum(1 + x['size'] for x in user_columns) - reserved
     before = [{"name": "idx", "size": 3, "heading": "Num"},
@@ -1069,12 +1036,6 @@ def generate_songlist_display(song=False, zeromsg=None, frmat="search"):
         out += line + "\n"
 
     return out + "\n" * (5 - len(songs)) if not song else out
-
-
-def writestatus(text, mute=False):
-    """ Update status line. """
-    if not mute and Config.SHOW_STATUS.get:
-        xprint(text, end='\r')
 
 
 def generate_real_playerargs(song, override, failcount):
@@ -1192,11 +1153,11 @@ def playsong(song, failcount=0, override=False):
 
     # don't interrupt preloading:
     while song.ytid in g.preloading:
-        writestatus("fetching item..")
+        screen.writestatus("fetching item..")
         time.sleep(0.1)
 
     try:
-        streams.get(song, force=failcount, callback=writestatus)
+        streams.get(song, force=failcount, callback=screen.writestatus)
 
     except (IOError, URLError, HTTPError, socket.timeout) as e:
         dbg("--ioerror in playsong call to streams.get %s", str(e))
@@ -1242,7 +1203,7 @@ def playsong(song, failcount=0, override=False):
         return
 
     songdata = "%s; %s; %s Mb" % songdata
-    writestatus(songdata)
+    screen.writestatus(songdata)
     dbg("%splaying %s (%s)%s", c.b, song.title, failcount, c.w)
     dbg("calling %s", " ".join(cmd))
     returncode = launch_player(song, songdata, cmd)
@@ -1251,7 +1212,7 @@ def playsong(song, failcount=0, override=False):
     if failed and failcount < g.max_retries:
         dbg(c.r + "stream failed to open" + c.w)
         dbg("%strying again (attempt %s)%s", c.r, (2 + failcount), c.w)
-        writestatus("error: retrying")
+        screen.writestatus("error: retrying")
         time.sleep(1.2)
         failcount += 1
         return playsong(song, failcount=failcount, override=override)
@@ -1447,7 +1408,7 @@ def player_status(po_obj, prefix, songlength=0, mpv=False, sockpath=None):
                                             volume=volume_level)
 
                     if line != last_displayed_line:
-                        writestatus(line)
+                        screen.writestatus(line)
                         last_displayed_line = line
 
         except socket.error:
@@ -1488,7 +1449,7 @@ def player_status(po_obj, prefix, songlength=0, mpv=False, sockpath=None):
                                             volume=volume_level)
 
                     if line != last_displayed_line:
-                        writestatus(line)
+                        screen.writestatus(line)
                         last_displayed_line = line
 
                 if buff.startswith('ANS_volume='):
@@ -1535,7 +1496,7 @@ def make_status_line(elapsed_s, prefix, songlength=0, volume=None):
     else:
         vol_suffix = ""
 
-    cw = getxy().width
+    cw = screen.getxy().width
     prog_bar_size = cw - len(prefix) - len(status_line) - len(vol_suffix) - 7
     progress = int(math.ceil(pct / 100 * prog_bar_size))
     status_line += " [%s]" % ("=" * (progress - 1) +
@@ -1550,7 +1511,7 @@ def _search(progtext, qs=None, splash=True, pre_load=True):
     # show splash screen during fetch
     if splash:
         g.content = logo(c.b) + "\n\n"
-        screen_update()
+        screen.update()
 
     # perform fetch
     wdata = call_gdata('search', qs)
@@ -1572,7 +1533,7 @@ def _search(progtext, qs=None, splash=True, pre_load=True):
 
 def token(page):
     """ Returns a page token for a given start index. """
-    index = (page or 0) * getxy().max_results
+    index = (page or 0) * screen.getxy().max_results
     k = index//128 - 1
     index -= 128 * k
     f = [8, index]
@@ -1583,10 +1544,10 @@ def token(page):
     return b64.strip('=')
 
 
-def generate_search_qs(term, page=0, result_count=getxy().max_results, match='term'):
+def generate_search_qs(term, page=0, result_count=screen.getxy().max_results, match='term'):
     """ Return query string. """
     if not result_count:
-        result_count = getxy().max_results
+        result_count = screen.getxy().max_results
 
     aliases = dict(views='viewCount')
     qs = {
@@ -1666,6 +1627,7 @@ def channelfromname(user):
     return (user, channel_id)
 
 
+@commands.command(r'user\s+(.+)$')
 def usersearch(q_user, page=0, splash=True, identify='forUsername'):
     """ Fetch uploads by a YouTube user. """
 
@@ -1754,6 +1716,8 @@ def related_search(vitem, page=0, splash=True):
         g.last_search_query = {}
 
 
+# Note: [^./] is to prevent overlap with playlist search command
+@commands.command(r'(?:search|\.|/)\s*([^./].{1,500})')
 def search(term, page=0, splash=True):
     """ Perform search. """
     if not term or len(term) < 2:
@@ -1780,12 +1744,14 @@ def search(term, page=0, splash=True):
         g.last_search_query = {}
 
 
+@commands.command(r'u(?:ser)?pl\s(.*)$')
 def user_pls(user, page=0, splash=True):
     """ Retrieve user playlists. """
     user = {"is_user": True, "term": user}
     return pl_search(user, page=page, splash=splash)
 
 
+@commands.command(r'(?:\.\.|\/\/|pls(?:earch)?\s)\s*(.*)$')
 def pl_search(term, page=0, splash=True, is_user=False):
     """ Search for YouTube playlists.
 
@@ -1805,7 +1771,7 @@ def pl_search(term, page=0, splash=True, is_user=False):
         g.content = logo(c.g)
         prog = "user: " + term if is_user else term
         g.message = "Searching playlists for %s" % c.y + prog + c.w
-        screen_update()
+        screen.update()
 
     if is_user:
         ret = channelfromname(term)
@@ -1816,7 +1782,8 @@ def pl_search(term, page=0, splash=True, is_user=False):
     else:
         # playlist search is done with the above url and param type=playlist
         logging.info("playlist search for %s", prog)
-        max_results = min(getxy().max_results, 50) # Limit for playlists command
+        # Limit for playlists command
+        max_results = min(screen.getxy().max_results, 50)
         qs = generate_search_qs(term, page, result_count=max_results)
         qs['type'] = 'playlist'
         if 'videoCategoryId' in qs:
@@ -1935,11 +1902,11 @@ def fetch_comments(item):
     """ Fetch comments for item using gdata. """
     # pylint: disable=R0912
     # pylint: disable=R0914
-    cw, ch, _ = getxy()
+    cw, ch, _ = screen.getxy()
     ch = max(ch, 10)
     ytid, title = item.ytid, item.title
     dbg("Fetching comments for %s", c.c("y", ytid))
-    writestatus("Fetching comments for %s" % c.c("y", title[:55]))
+    screen.writestatus("Fetching comments for %s" % c.c("y", title[:55]))
     qs = {'textFormat': 'plainText',
           'videoId': ytid,
           'maxResults': 50,
@@ -2000,7 +1967,7 @@ def fetch_comments(item):
         content_length = linecount(pagetext) + longlines(pagetext)
         blanks = "\n" * (-2 + ch - content_length)
         g.content = pagetext + blanks
-        screen_update(fill_blank=False)
+        screen.update(fill_blank=False)
         xprint("%s : Use [Enter] for next, [p] for previous, [q] to return:"
                % pagecounter, end="")
         v = input()
@@ -2017,6 +1984,7 @@ def fetch_comments(item):
     g.content = generate_songlist_display()
 
 
+@commands.command(r'c\s?(\d{1,4})$')
 def comments(number):
     """ Receive use request to view comments. """
     if g.browse_mode == "normal":
@@ -2261,8 +2229,7 @@ def _parse_multi(choice, end=None):
     return alltracks
 
 
-
-
+@commands.command(r'play\s+(%s|\d+)$' % commands.word)
 def play_pl(name):
     """ Play a playlist by name. """
     if name.isdigit():
@@ -2284,6 +2251,7 @@ def play_pl(name):
         g.content = playlists_display()
 
 
+@commands.command(r'save$')
 def save_last():
     """ Save command with no playlist name. """
     if g.last_opened:
@@ -2307,6 +2275,7 @@ def save_last():
         open_save_view("save", saveas)
 
 
+@commands.command(r'(open|save|view)\s*(%s)$' % commands.word)
 def open_save_view(action, name):
     """ Open, save or view a playlist by name.  Get closest name match. """
     name = name.replace(" ", "-")
@@ -2359,6 +2328,7 @@ def open_save_view(action, name):
             g.content = generate_songlist_display(frmat=None)
 
 
+@commands.command(r'(open|view)\s*(\d{1,4})$')
 def open_view_bynum(action, num):
     """ Open or view a saved playlist by number. """
     srt = sorted(g.userpl)
@@ -2366,6 +2336,7 @@ def open_view_bynum(action, num):
     open_save_view(action, name)
 
 
+@commands.command(r'(rm|add)\s*(-?\d[-,\d\s]{,250})$')
 def songlist_rm_add(action, songrange):
     """ Remove or add tracks. works directly on user input. """
     selection = _parse_multi(songrange)
@@ -2396,6 +2367,7 @@ def songlist_rm_add(action, songrange):
     g.content = generate_songlist_display()
 
 
+@commands.command(r'(da|dv)\s+((?:\d+\s\d+|-\d|\d+-|\d,)(?:[\d\s,-]*))$')
 def down_many(dltype, choice, subdir=None):
     """ Download multiple items. """
     choice = _parse_multi(choice)
@@ -2411,7 +2383,7 @@ def down_many(dltype, choice, subdir=None):
         """ Handle error in download. """
         g.message = message
         g.content = disp
-        screen_update()
+        screen.update()
         time.sleep(2)
         g.model.songs.pop(0)
 
@@ -2422,7 +2394,7 @@ def down_many(dltype, choice, subdir=None):
             title = "Download Queue (%s):%s\n\n" % (av, c.w)
             disp = re.sub(r"(Num\s*?Title.*?\n)", title, disp)
             g.content = disp
-            screen_update()
+            screen.update()
 
             try:
                 filename = _make_fname(song, None, av=av, subdir=subdir)
@@ -2459,6 +2431,7 @@ def down_many(dltype, choice, subdir=None):
         g.content = generate_songlist_display()
 
 
+@commands.command(r'(da|dv)pl\s+%s' % commands.pl)
 def down_plist(dltype, parturl):
     """ Download YouTube playlist. """
 
@@ -2471,6 +2444,7 @@ def down_plist(dltype, parturl):
     g.message = msg
 
 
+@commands.command(r'(da|dv)upl\s+(.*)$')
 def down_user_pls(dltype, user):
     """ Download all user playlists. """
     user_pls(user)
@@ -2480,6 +2454,8 @@ def down_user_pls(dltype, user):
     return
 
 
+@commands.command(r'(%s{0,3})([-,\d\s]{1,250})\s*(%s{0,3})$' %
+        (commands.rs, commands.rs))
 def play(pre, choice, post=""):
     """ Play choice.  Use repeat/random if appears in pre/post. """
     # pylint: disable=R0914
@@ -2535,12 +2511,15 @@ def play(pre, choice, post=""):
         play_range(songlist, shuffle, repeat, override)
 
 
+@commands.command(r'(%s{0,3})(?:\*|all)\s*(%s{0,3})$' %
+        (commands.rs, commands.rs))
 def play_all(pre, choice, post=""):
     """ Play all tracks in model (last displayed). shuffle/repeat if req'd."""
     options = pre + choice + post
     play(options, "1-" + str(len(g.model.songs)))
 
 
+@commands.command(r'ls$')
 def ls():
     """ List user saved playlists. """
     if not g.userpl:
@@ -2552,6 +2531,7 @@ def ls():
         g.message = F('pl help')
 
 
+@commands.command(r'vp$')
 def vp():
     """ View current working playlist. """
     if g.active.is_empty:
@@ -2596,12 +2576,6 @@ def preload(song, delay=2, override=False):
         g.preloading.remove(song.ytid)
 
 
-def reset_terminal():
-    """ Reset terminal control character and modes for non Win OS's. """
-    if not mswin:
-        subprocess.call(["tset", "-c"])
-
-
 def play_range(songlist, shuffle=False, repeat=False, override=False):
     """ Play a range of songs, exit cleanly on keyboard interrupt. """
     if shuffle:
@@ -2613,7 +2587,7 @@ def play_range(songlist, shuffle=False, repeat=False, override=False):
         g.content = playback_progress(n, songlist, repeat=repeat)
 
         if not g.command_line:
-            screen_update(fill_blank=False)
+            screen.update(fill_blank=False)
 
         hasnext = len(songlist) > n + 1
 
@@ -2630,7 +2604,7 @@ def play_range(songlist, shuffle=False, repeat=False, override=False):
         except KeyboardInterrupt:
             logging.info("Keyboard Interrupt")
             xprint(c.w + "Stopping...                          ")
-            reset_terminal()
+            screen.reset_terminal()
             g.message = c.y + "Playback halted" + c.w
             break
         set_window_title("mpsyt")
@@ -2653,12 +2627,14 @@ def play_range(songlist, shuffle=False, repeat=False, override=False):
     g.content = generate_songlist_display()
 
 
+@commands.command(r'(?:help|h)(?:\s+([-_a-zA-Z]+))?$')
 def show_help(choice):
     """ Print help message. """
 
     g.content = get_help(choice)
 
 
+@commands.command(r'(?:q|quit|exit)$')
 def quits(showlogo=True):
     """ Exit the program. """
     if has_readline:
@@ -2667,7 +2643,7 @@ def quits(showlogo=True):
 
     cache.save()
 
-    clear_screen()
+    screen.clear()
     msg = logo(c.r, version=__version__) if showlogo else ""
     xprint(msg + F("exitmsg", 2))
 
@@ -2726,7 +2702,7 @@ def get_dl_data(song, mediatype="any"):
 
         dldata.append(item)
 
-    writestatus("")
+    screen.writestatus("")
     return dldata, p
 
 
@@ -2745,7 +2721,7 @@ def menu_prompt(model, prompt=" > ", rows=None, header=None, theading=None,
             content += x + "\n"
 
     g.content = content
-    screen_update()
+    screen.update()
 
     choice = input(prompt)
 
@@ -2822,6 +2798,7 @@ def gen_dl_text(ddata, song, p):
     return(content, hdr, heading, footer)
 
 
+@commands.command(r'(dv|da|d|dl|download)\s*(\d{1,4})$')
 def download(dltype, num):
     """ Download a track or playlist by menu item number. """
     # This function needs refactoring!
@@ -2844,7 +2821,7 @@ def download(dltype, num):
         g.content = generate_songlist_display()
         return
 
-    writestatus("Fetching video info...")
+    screen.writestatus("Fetching video info...")
     song = (g.model.songs[int(num) - 1])
     best = dltype.startswith("dv") or dltype.startswith("da")
 
@@ -2934,7 +2911,7 @@ def prompt_for_exit():
     """ Ask for exit confirmation. """
     g.message = c.r + "Press ctrl-c again to exit" + c.w
     g.content = generate_songlist_display()
-    screen_update()
+    screen.update()
 
     try:
         userinput = input(c.r + " > " + c.w)
@@ -2945,6 +2922,7 @@ def prompt_for_exit():
     return userinput
 
 
+@commands.command(r'rmp\s*(\d+|%s)$' % commands.word)
 def playlist_remove(name):
     """ Delete a saved playlist by name - or purge working playlist if *all."""
     if name.isdigit() or g.userpl.get(name):
@@ -2963,6 +2941,7 @@ def playlist_remove(name):
         g.content = playlists_display()
 
 
+@commands.command(r'(mv|sw)\s*(\d{1,4})\s*[\s,]\s*(\d{1,4})$')
 def songlist_mv_sw(action, a, b):
     """ Move a song or swap two songs. """
     i, j = int(a) - 1, int(b) - 1
@@ -2978,6 +2957,7 @@ def songlist_mv_sw(action, a, b):
     g.content = generate_songlist_display()
 
 
+@commands.command(r'add\s*(-?\d[-,\d\s]{1,250})(%s)$' % commands.word)
 def playlist_add(nums, playlist):
     """ Add selected song nums to saved playlist. """
     nums = _parse_multi(nums)
@@ -2998,12 +2978,14 @@ def playlist_add(nums, playlist):
     g.content = generate_songlist_display()
 
 
+@commands.command(r'mv\s*(\d{1,3})\s*(%s)$' % commands.word)
 def playlist_rename_idx(_id, name):
     """ Rename a playlist by ID. """
     _id = int(_id) - 1
     playlist_rename(sorted(g.userpl)[_id] + " " + name)
 
 
+@commands.command(r'mv\s*(%s\s+%s)$' % (commands.word, commands.word))
 def playlist_rename(playlists):
     """ Rename a playlist using mv command. """
     # Deal with old playlist names that permitted spaces
@@ -3023,6 +3005,7 @@ def playlist_rename(playlists):
     save_to_file()
 
 
+@commands.command(r'(rm|add)\s(?:\*|all)$')
 def add_rm_all(action):
     """ Add all displayed songs to current playlist.
 
@@ -3040,11 +3023,12 @@ def add_rm_all(action):
         songlist_rm_add("add", "-" + str(size))
 
 
+@commands.command(r'(n|p)\s*(\d{1,2})?$')
 def nextprev(np, page=None):
     """ Get next / previous search results. """
     glsq = g.last_search_query
     content = g.model.songs
-    max_results = getxy().max_results
+    max_results = screen.getxy().max_results
 
     if "user" in g.last_search_query:
         function, query = usersearch_id, glsq['user']
@@ -3093,6 +3077,7 @@ def nextprev(np, page=None):
     return good
 
 
+@commands.command(r'u\s?([\d]{1,4})$')
 def user_more(num):
     """ Show more videos from user of vid num. """
     if g.browse_mode != "normal":
@@ -3108,6 +3093,7 @@ def user_more(num):
     usersearch_id('/'.join([user, channel_id, '']), 0, True)
 
 
+@commands.command(r'r\s?(\d{1,4})$')
 def related(num):
     """ Show videos related to to vid num. """
     if g.browse_mode != "normal":
@@ -3121,6 +3107,7 @@ def related(num):
     related_search(item)
 
 
+@commands.command(r'x\s*(\d+)$')
 def clip_copy(num):
     """ Copy item to clipboard. """
     if g.browse_mode == "ytpl":
@@ -3157,6 +3144,8 @@ def clip_copy(num):
         g.message += "see https://pypi.python.org/pypi/pyperclip/"
         g.content = generate_songlist_display()
 
+
+@commands.command(r'mix\s*(\d{1,4})$')
 def mix(num):
     """ Retrieves the YouTube mix for the selected video. """
     g.content = g.content or generate_songlist_display()
@@ -3175,6 +3164,7 @@ def mix(num):
             g.message = F('no mix')
 
 
+@commands.command(r'i\s*(\d{1,4})$')
 def info(num):
     """ Get video description. """
     if g.browse_mode == "ytpl":
@@ -3186,7 +3176,7 @@ def info(num):
         if not yt_playlist:
             g.content = logo(col=c.g)
             g.message = "Fetching playlist info.."
-            screen_update()
+            screen.update()
             dbg("%sFetching playlist using pafy%s", c.y, c.w)
             yt_playlist = pafy.get_playlist(p['link'])
             g.pafy_pls[p['link']] = yt_playlist
@@ -3213,13 +3203,13 @@ def info(num):
 
     elif g.browse_mode == "normal":
         g.content = logo(c.b)
-        screen_update()
-        writestatus("Fetching video metadata..")
+        screen.update()
+        screen.writestatus("Fetching video metadata..")
         item = (g.model.songs[int(num) - 1])
         streams.get(item)
         p = get_pafy(item)
         pub = time.strptime(str(p.published), "%Y-%m-%d %H:%M:%S")
-        writestatus("Fetched")
+        screen.writestatus("Fetched")
         out = c.ul + "Video Info" + c.w + "\n\n"
         out += p.title or ""
         out += "\n" + (p.description or "")
@@ -3235,6 +3225,7 @@ def info(num):
         g.content = out
 
 
+@commands.command(r'playurl\s(.*[-_a-zA-Z0-9]{11}[^\s]*)(\s-(?:f|a|w))?$')
 def play_url(url, override):
     """ Open and play a youtube video url. """
     override = override if override else "_"
@@ -3248,6 +3239,36 @@ def play_url(url, override):
         sys.exit()
 
 
+@commands.command(r'browserplay\s(\d{1,50})')
+def browser_play(number):
+    """Open a previously searched result in the browser."""
+    if (len(g.model.songs) == 0):
+        g.message = c.r + "No previous search." + c.w
+        g.content = logo(c.r)
+        return
+
+    try:
+        index = int(number) - 1
+
+        if (0 <= index < len(g.model.songs)):
+            base_url = "https://www.youtube.com/watch?v="
+            video = g.model.songs[index]
+            url = base_url + video.ytid
+            webbrowser.open(url)
+            g.content = g.content or generate_songlist_display()
+
+        else:
+            g.message = c.r + "Out of range." + c.w
+            g.content = g.content or generate_songlist_display()
+            return
+
+    except (HTTPError, URLError, Exception) as e:
+        g.message = c.r + str(e) + c.w
+        g.content = g.content or generate_songlist_display()
+        return
+
+
+@commands.command(r'dlurl\s(.*[-_a-zA-Z0-9]{11}.*$)')
 def dl_url(url):
     """ Open and prompt for download of youtube video url. """
     g.browse_mode = "normal"
@@ -3260,19 +3281,27 @@ def dl_url(url):
         sys.exit()
 
 
+@commands.command(r'url\s(.*[-_a-zA-Z0-9]{11}.*$)')
 def yt_url(url, print_title=0):
-    """ Acess a video by url. """
-    try:
-        p = pafy.new(url)
+    """ Acess videos by urls. """
+    url_list = url.split()
 
-    except (IOError, ValueError) as e:
-        g.message = c.r + str(e) + c.w
-        g.content = g.content or generate_songlist_display(zeromsg=g.message)
-        return
+    g.model.songs = []
 
-    g.browse_mode = "normal"
-    v = Video(p.videoid, p.title, p.length)
-    g.model.songs = [v]
+    for u in url_list:
+        try:
+            p = pafy.new(u)
+
+        except (IOError, ValueError) as e:
+            g.message = c.r + str(e) + c.w
+            g.content = g.content or generate_songlist_display(zeromsg=g.message)
+            return
+
+        g.browse_mode = "normal"
+        v = Video(p.videoid, p.title, p.length)
+        g.model.songs += [v]
+
+    
 
     if not g.command_line:
         g.content = generate_songlist_display()
@@ -3281,6 +3310,25 @@ def yt_url(url, print_title=0):
         xprint(v.title)
 
 
+@commands.command(r'url_file\s(\S+$)')
+def yt_url_file(file_name):
+    """ Access a list of urls in a text file """
+
+    #Open and read the file
+    try:
+        with open(file_name, "r") as fo:
+            output = ' '.join([line.strip() for line in fo if line.strip()])
+
+    except (IOError):
+        g.message = c.r + 'Error while opening the file, check the validity of the path' + c.w
+        g.content = g.content or generate_songlist_display(zeromsg=g.message)
+        return
+
+    #Finally pass the input to yt_url
+    yt_url(output)
+
+
+@commands.command(r'(un)?dump')
 def dump(un):
     """ Show entire playlist. """
     if g.last_search_query.get("playlist") and not un:
@@ -3296,9 +3344,10 @@ def dump(un):
         g.content = generate_songlist_display()
 
 
+@commands.command(r'pl\s+%s' % commands.pl)
 def plist(parturl, page=0, splash=True, dumps=False):
     """ Retrieve YouTube playlist. """
-    max_results = getxy().max_results
+    max_results = screen.getxy().max_results
 
     if "playlist" in g.last_search_query and\
             parturl == g.last_search_query['playlist']:
@@ -3320,7 +3369,7 @@ def plist(parturl, page=0, splash=True, dumps=False):
     if splash:
         g.content = logo(col=c.b)
         g.message = "Retrieving YouTube playlist"
-        screen_update()
+        screen.update()
 
     dbg("%sFetching playlist using pafy%s", c.y, c.w)
     yt_playlist = pafy.get_playlist(parturl)
@@ -3357,13 +3406,15 @@ def plist(parturl, page=0, splash=True, dumps=False):
     g.message = "Showing YouTube playlist %s" % (c.y + ytpl_title + c.w)
 
 
-def shuffle_fn(_):
+@commands.command(r'shuffle$')
+def shuffle_fn():
     """ Shuffle displayed items. """
     random.shuffle(g.model.songs)
     g.message = c.y + "Items shuffled" + c.w
     g.content = generate_songlist_display()
 
 
+@commands.command(r'clearcache$')
 def clearcache():
     """ Clear cached items - for debugging use. """
     g.pafs = {}
@@ -3379,7 +3430,7 @@ def show_message(message, col=c.r, update=False):
     g.message = col + message + c.w
 
     if update:
-        screen_update()
+        screen.update()
 
 
 def _do_query(url, query, err='query failed', report=False):
@@ -3561,6 +3612,7 @@ def _get_mb_album(albumname, **kwa):
     return dict(artist=artist, title=title, aid=aid)
 
 
+@commands.command(r'album\s*(.{0,500})')
 def search_album(term, page=0, splash=True):
     """Search for albums. """
     # pylint: disable=R0914,R0912
@@ -3586,7 +3638,7 @@ def search_album(term, page=0, splash=True):
 
     if splash:
         g.message, g.content = out, logo(c.b)
-        screen_update()
+        screen.update()
 
     prompt = "Artist? [%s] > " % album['artist']
     xprint(prompt, end="")
@@ -3619,7 +3671,7 @@ def search_album(term, page=0, splash=True):
         g.content += "%02s  %s" % (n, track['title'])
         g.content += "\n"
 
-    screen_update()
+    screen.update()
     entry = input("Continue? [Enter] > ")
 
     if entry == "":
@@ -3630,7 +3682,7 @@ def search_album(term, page=0, splash=True):
         return
 
     songs = []
-    clear_screen()
+    screen.clear()
     itt = _match_tracks(artist, title, mb_tracks)
 
     stash = Config.SEARCH_MUSIC.get, Config.ORDER.get
@@ -3667,6 +3719,7 @@ def search_album(term, page=0, splash=True):
         g.last_search_query = ""
 
 
+@commands.command(r'encoders?$')
 def show_encs():
     """ Display available encoding presets. """
     encs = g.encoders
@@ -3724,7 +3777,7 @@ def main():
     if not g.command_line:
         g.content = logo(col=c.g, version=__version__) + "\n\n"
         g.message = "Enter /search-term to search or [h]elp"
-        screen_update()
+        screen.update()
 
     # open playlists from file
     convert_playlist_to_v2()
@@ -3732,58 +3785,6 @@ def main():
 
     arg_inp = ' '.join(g.argument_commands)
 
-    # input types
-    word = r'[^\W\d][-\w\s]{,100}'
-    rs = r'(?:repeat\s*|shuffle\s*|-a\s*|-v\s*|-f\s*|-w\s*)'
-    pl = r'\S*((?:RD|PL)[-_0-9a-zA-Z]+)$\S*'
-    regx = {
-        ls: r'ls$',
-        vp: r'vp$',
-        mix: r'mix\s*(\d{1,4})$',
-        dump: r'(un)?dump',
-        play: r'(%s{0,3})([-,\d\s]{1,250})\s*(%s{0,3})$' % (rs, rs),
-        info: r'i\s*(\d{1,4})$',
-        quits: r'(?:q|quit|exit)$',
-        plist: r'pl\s+%s' % pl,
-        yt_url: r'url\s(.*[-_a-zA-Z0-9]{11}.*$)',
-        search: r'(?:search|\.|/)\s*([^./].{1,500})',
-        dl_url: r'dlurl\s(.*[-_a-zA-Z0-9]{11}.*$)',
-        play_pl: r'play\s+(%s|\d+)$' % word,
-        related: r'r\s?(\d{1,4})$',
-        download: r'(dv|da|d|dl|download)\s*(\d{1,4})$',
-        play_url: r'playurl\s(.*[-_a-zA-Z0-9]{11}[^\s]*)(\s-(?:f|a|w))?$',
-        comments: r'c\s?(\d{1,4})$',
-        nextprev: r'(n|p)\s*(\d{1,2})?$',
-        play_all: r'(%s{0,3})(?:\*|all)\s*(%s{0,3})$' % (rs, rs),
-        user_pls: r'u(?:ser)?pl\s(.*)$',
-        save_last: r'save\s*$',
-        pl_search: r'(?:\.\.|\/\/|pls(?:earch)?\s)\s*(.*)$',
-        # setconfig: r'set\s+([-\w]+)\s*"?([^"]*)"?\s*$',
-        setconfig: r'set\s+([-\w]+)\s*(.*?)\s*$',
-        clip_copy: r'x\s*(\d+)$',
-        down_many: r'(da|dv)\s+((?:\d+\s\d+|-\d|\d+-|\d,)(?:[\d\s,-]*))\s*$',
-        show_help: r'(?:help|h)(?:\s+([-_a-zA-Z]+)\s*)?$',
-        show_encs: r'encoders?\s*$',
-        user_more: r'u\s?([\d]{1,4})$',
-        down_plist: r'(da|dv)pl\s+%s' % pl,
-        clearcache: r'clearcache$',
-        usersearch: r'user\s+([^\s].{1,})$',
-        shuffle_fn: r'\s*(shuffle)\s*$',
-        add_rm_all: r'(rm|add)\s(?:\*|all)$',
-        showconfig: r'(set|showconfig)\s*$',
-        search_album: r'album\s*(.{0,500})',
-        playlist_add: r'add\s*(-?\d[-,\d\s]{1,250})(%s)$' % word,
-        down_user_pls: r'(da|dv)upl\s+(.*)$',
-        open_save_view: r'(open|save|view)\s*(%s)$' % word,
-        songlist_mv_sw: r'(mv|sw)\s*(\d{1,4})\s*[\s,]\s*(\d{1,4})$',
-        songlist_rm_add: r'(rm|add)\s*(-?\d[-,\d\s]{,250})$',
-        playlist_rename: r'mv\s*(%s\s+%s)$' % (word, word),
-        playlist_remove: r'rmp\s*(\d+|%s)$' % word,
-        open_view_bynum: r'(open|view)\s*(\d{1,4})$',
-        playlist_rename_idx: r'mv\s*(\d{1,3})\s*(%s)\s*$' % word}
-
-    # compile regexp's
-    regx = {func: re.compile(val, re.UNICODE) for func, val in regx.items()}
     prompt = "> "
     arg_inp = arg_inp.replace(r",,", "[mpsyt-comma]")
     arg_inp = arg_inp.split(",")
@@ -3792,7 +3793,7 @@ def main():
         next_inp = ""
 
         if len(arg_inp):
-            arg_inp, next_inp = arg_inp[1:], arg_inp[0].strip()
+            next_inp = arg_inp.pop(0).strip()
             next_inp = next_inp.replace("[mpsyt-comma]", ",")
 
         try:
@@ -3801,8 +3802,8 @@ def main():
         except (KeyboardInterrupt, EOFError):
             userinput = prompt_for_exit()
 
-        for k, v in regx.items():
-            if matchfunction(k, v, userinput):
+        for i in g.commands:
+            if matchfunction(i.function, i.regex, userinput):
                 break
 
         else:
@@ -3817,4 +3818,4 @@ def main():
             elif userinput and g.command_line:
                 sys.exit("Bad syntax")
 
-        screen_update()
+        screen.update()
